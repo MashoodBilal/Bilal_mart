@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "products"
+version = "0.1.0"
+description = ""
+authors = ["Mohammad Mashood Bilal <mohammadmashoodbilal@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+requests = "^2.32.3"
+aiokafka = "^0.10.0"
+flask = "^3.0.3"
+fastapi = "^0.111.0"
+sqlmodel = "^0.0.19"
+psycopg2 = "^2.9.9"
+psycopg = "^3.1.19"
+pytest = "^8.2.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
