@@ -64,3 +64,25 @@ def get_product_by_item_number(item_number: int):
             return {"id": product.id, "name": product.name, "type": product.type, "price": product.price, "sku": product.sku, "details": product.details, "stock_availability": product.stock_availability}
         else:
             raise HTTPException(status_code=404, detail="Product not found")
+
+
+
+
+@app.post("/edit_inventory/{item_number}")
+def edit_inventory(item_number: int, quantity_sold: int):
+    with Session(engine) as session:
+        product = session.query(Product).filter(Product.id == item_number).first()
+        if product:
+            if product.stock_availability == "In Stock":
+                if product.stock_availability >= quantity_sold:
+                    product.stock_availability -= quantity_sold
+                    if product.stock_availability == 0:
+                        product.stock_availability = "Out of Stock"
+                    session.commit()
+                    return {"message": "Inventory updated successfully"}
+                else:
+                    raise HTTPException(status_code=400, detail="Not enough stock available")
+            else:
+                raise HTTPException(status_code=400, detail="Item is out of stock")
+        else:
+            raise HTTPException(status_code=404, detail="Product not found")
