@@ -1,0 +1,45 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: mashood
+      POSTGRES_DB: mashood_db
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: mashood
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    command: ["kong", "migrations", "bootstrap", "&&", "kong", "start"]
+    restart: on-failure
+
+  kong:
+    image: kong:latest
+    environment:
+      KONG_PG_HOST: db
+      KONG_PG_USER: postgres
+      KONG_PG_PASSWORD: mashood
+      KONG_PG_DATABASE: mashood_db
+    ports:
+      - "8000:8000"
+      - "8443:8443"
+    depends_on:
+      - db
+    volumes:
+      - kong-data:/usr/local/kong
+
+volumes:
+  db-data:
+  pgadmin-data:
+  kong-data:

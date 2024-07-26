@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "orders"
+name = "inventory"
 version = "0.1.0"
 description = ""
 authors = ["Mohammad Mashood Bilal <mohammadmashoodbilal@gmail.com>"]

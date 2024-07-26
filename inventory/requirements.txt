@@ -1,0 +1,9 @@
+fastapi==0.70.0
+uvicorn==0.17.6
+sqlalchemy==1.4.25
+psycopg2-binary==2.9.3
+kafka-python==2.0.2
+protobuf==3.19.4
+pydantic==1.10.2
+python-dotenv==0.20.0
+structlog==21.5.0

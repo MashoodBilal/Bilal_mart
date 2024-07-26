@@ -1,0 +1,11 @@
+external : internal
+5050 : 50 	pgadmin
+5432 : 5432 	postgres
+kafka:9092	kafka
+zookeeper:2181	zookeeper
+7998 : 8001	kong app (admin)
+7999 : 8000	kong (proxy)
+8000 : 8000	user service
+8001 : 8000	products service
+8002 : 8000	inventory service
+8003 : 8000	order service

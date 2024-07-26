@@ -1,88 +1,108 @@
-import requests
-import json
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.requests import Request
 from sqlmodel import SQLModel, Field, Session, create_engine
+from aiokafka import AIOKafkaProducer       # type: ignore
+from aiokafka.errors import KafkaError      # type: ignore
 from products import settings
+import os
 
-app = FastAPI()
+app = FastAPI(title="Product Service", description="Manages product catalog")
 
-# Create a Postgres engine
+# Database setup
 connection_string = str(settings.DATABASE_URL).replace(
     "postgresql", "postgresql+psycopg"
 )
+engine = create_engine(
+    connection_string, connect_args={"sslmode": "require"}, pool_recycle=300
+)
+SQLModel.metadata.create_all(engine)
 
-engine = create_engine(connection_string, connect_args={}, pool_recycle=300)
+# Kafka setup
+KAFKA_BOOTSTRAP_SERVERS = os.environ["KAFKA_BOOTSTRAP_SERVERS"]
+KAFKA_TOPIC = os.environ["KAFKA_TOPIC"]
+producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
 
-# Define the Product model
+# Models
 class Product(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)
     name: str
-    type: str
+    description: str
     price: float
-    sku: str
-    details: str
-    stock_availability: str
+    inventory: int
 
-# Create the tables in the database
-SQLModel.metadata.create_all(engine)
+# CRUD operations
+@app.post("/products/")
+async def create_product(product: Product):
+    with Session(engine) as session:
+        session.add(product)
+        session.commit()
+        session.refresh(product)
+    await producer.start()
+    try:
+        await producer.send_and_wait(KAFKA_TOPIC, value={"type": "product_created", "data": product.dict()})
+    except KafkaError as e:
+        await producer.stop()
+        raise HTTPException(status_code=500, detail="Failed to send event to Kafka topic")
+    await producer.stop()
+    return JSONResponse(content={"message": "Product created successfully"}, status_code=201)
 
-# Get the JSON API data
-response = requests.get("https://dummyjson.com/products")
-data = response.json()
-
-# Remove unwanted items and keep only 7 items
-products = []
-for product in data["products"][:7]:
-    products.append({
-        "name": product["title"],
-        "type": product["category"],
-        "price": product["price"],
-        "sku": product["sku"],
-        "details": product["description"],
-        "stock_availability": product["availabilityStatus"]
-    })
-
-# Enter the details into the Postgres database
-with Session(engine) as session:
-    for product in products:
-        db_product = Product(**product)
-        session.add(db_product)
-    session.commit()
-
-# Define the FastAPI endpoints
 @app.get("/products/")
-def get_all_products():
+async def read_products():
     with Session(engine) as session:
         products = session.query(Product).all()
-        return [{"id": product.id, "name": product.name, "type": product.type, "price": product.price, "stock_availability": product.stock_availability} for product in products]
+    return JSONResponse(content={"products": [product.dict() for product in products]})
 
-@app.get("/products/{item_number}")
-def get_product_by_item_number(item_number: int):
+@app.get("/products/{product_id}")
+async def read_product(product_id: int):
     with Session(engine) as session:
-        product = session.query(Product).filter(Product.id == item_number).first()
-        if product:
-            return {"id": product.id, "name": product.name, "type": product.type, "price": product.price, "sku": product.sku, "details": product.details, "stock_availability": product.stock_availability}
-        else:
+        product = session.query(Product).get(product_id)
+        if product is None:
             raise HTTPException(status_code=404, detail="Product not found")
+    return JSONResponse(content={"product": product.dict()})
 
-
-
-
-@app.post("/edit_inventory/{item_number}")
-def edit_inventory(item_number: int, quantity_sold: int):
+@app.put("/products/{product_id}")
+async def update_product(product_id: int, product: Product):
     with Session(engine) as session:
-        product = session.query(Product).filter(Product.id == item_number).first()
-        if product:
-            if product.stock_availability == "In Stock":
-                if product.stock_availability >= quantity_sold:
-                    product.stock_availability -= quantity_sold
-                    if product.stock_availability == 0:
-                        product.stock_availability = "Out of Stock"
-                    session.commit()
-                    return {"message": "Inventory updated successfully"}
-                else:
-                    raise HTTPException(status_code=400, detail="Not enough stock available")
-            else:
-                raise HTTPException(status_code=400, detail="Item is out of stock")
-        else:
+        existing_product = session.query(Product).get(product_id)
+        if existing_product is None:
             raise HTTPException(status_code=404, detail="Product not found")
+        existing_product.name = product.name
+        existing_product.description = product.description
+        existing_product.price = product.price
+        existing_product.inventory = product.inventory
+        session.commit()
+    await producer.start()
+    try:
+        await producer.send_and_wait(KAFKA_TOPIC, value={"type": "product_updated", "data": product.dict()})
+    except KafkaError as e:
+        await producer.stop()
+        raise HTTPException(status_code=500, detail="Failed to send event to Kafka topic")
+    await producer.stop()
+    return JSONResponse(content={"message": "Product updated successfully"})
+
+@app.delete("/products/{product_id}")
+async def delete_product(product_id: int):
+    with Session(engine) as session:
+        product = session.query(Product).get(product_id)
+        if product is None:
+            raise HTTPException(status_code=404, detail="Product not found")
+        session.delete(product)
+        session.commit()
+    await producer.start()
+    try:
+        await producer.send_and_wait(KAFKA_TOPIC, value={"type": "product_deleted", "data": {"id": product_id}})
+    except KafkaError as e:
+        await producer.stop()
+        raise HTTPException(status_code=500, detail="Failed to send event to Kafka topic")
+    await producer.stop()
+    return JSONResponse(content={"message": "Product deleted successfully"})
+
+# Error handling
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(content={"error": exc.detail}, status_code=exc.status_code)
+
+@app.exception_handler(KafkaError)
+async def kafka_exception_handler(request: Request, exc: KafkaError):
+    return JSONResponse(content={"error": "Failed to send event to Kafka topic"}, status_code=500)

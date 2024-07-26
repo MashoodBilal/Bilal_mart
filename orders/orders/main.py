@@ -1,119 +1,112 @@
-# main.py
+# inventory_service/main.py
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from sqlmodel import SQLModel, Field, Session, create_engine
-from typing import List
+from kafka import KafkaProducer      # type: ignore
 from orders import settings
+import os
+import logging
 
-app = FastAPI()
+logging.basicConfig(level=logging.INFO)
 
-# Create a Postgres engine
-connection_string = str(settings.DATABASE_URL).replace(
-    "postgresql", "postgresql+psycopg"
-)
+app = FastAPI(title="Inventory Service", description="Handles order creation, updating, and tracking")
 
-engine = create_engine(connection_string, connect_args={}, pool_recycle=300)
+# Database setup
+connection_string = str(settings.DATABASE_URL).replace("postgresql", "postgresql+psycopg")
 
-with Session(engine) as session:
-    session.commit()
+engine = create_engine(connection_string, connect_args={"sslmode": "require"}, pool_recycle=300)
+SQLModel.metadata.create_all(engine)
 
-# Define the database models
-class Product(SQLModel, table=True):
-    id: int = Field(default=None, primary_key=True)
-    name: str
-    price: float
+# Kafka setup
+KAFKA_BOOTSTRAP_SERVERS = os.environ["KAFKA_BOOTSTRAP_SERVERS"]
+KAFKA_TOPIC_ORDER_CREATED = os.environ["KAFKA_TOPIC_ORDER_CREATED"]
+KAFKA_TOPIC_ORDER_UPDATED = os.environ["KAFKA_TOPIC_ORDER_UPDATED"]
+KAFKA_TOPIC_ORDER_TRACKED = os.environ["KAFKA_TOPIC_ORDER_TRACKED"]
 
-class Cart(SQLModel, table=True):
-    id: int = Field(default=None, primary_key=True)
-    customer_id: int
-    products: List["Product"] = []
+kafka_producer = KafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+
 
 class Order(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)
-    customer_id: int
-    products: List["Product"] = []
-    tracking_number: str
-    payment_method: str
-    purchase_receipt: str
+    user_id: int = Field(foreign_key="users.id")
+    product_id: int = Field(foreign_key="products.id")
+    quantity: int
+    status: str
 
+class User(SQLModel, table=True):
+    id: int = Field(default=None, primary_key=True)
+    name: str
+    email: str
 
+class Product(SQLModel, table=True):
+    id: int = Field(default=None, primary_key=True)
+    name: str
+    description: str
+    price: float
 
-# Define the API endpoints
-@app.post("/products/")
-def create_product(product: Product):
-    session.add(product)
-    session.commit()
-    return product
-
-@app.get("/products/")
-def read_products():
-    return session.query(Product).all()
-
-@app.post("/carts/")
-def create_cart(customer_id: int):
-    cart = Cart(customer_id=customer_id)
-    session.add(cart)
-    session.commit()
-    return cart
-
-@app.get("/carts/{cart_id}")
-def read_cart(cart_id: int):
-    return session.query(Cart).get(cart_id)
-
-@app.post("/carts/{cart_id}/products/")
-def add_product_to_cart(cart_id: int, product_id: int):
-    cart = session.query(Cart).get(cart_id)
-    product = session.query(Product).get(product_id)
-    if cart and product:
-        cart.products.append(product)
-        session.commit()
-        return cart
-    else:
-        raise HTTPException(status_code=404, detail="Cart or product not found")
-
-@app.delete("/carts/{cart_id}/products/{product_id}")
-def remove_product_from_cart(cart_id: int, product_id: int):
-    cart = session.query(Cart).get(cart_id)
-    product = session.query(Product).get(product_id)
-    if cart and product:
-        cart.products.remove(product)
-        session.commit()
-        return cart
-    else:
-        raise HTTPException(status_code=404, detail="Cart or product not found")
 
 @app.post("/orders/")
-def create_order(cart_id: int):
-    cart = session.query(Cart).get(cart_id)
-    if cart:
-        order = Order(customer_id=cart.customer_id, products=cart.products)
-        session.add(order)
-        session.commit()
-        # Redirect to multiple API locations
-        redirect_to_inventory(order)
-        create_tracking_number(order)
-        process_payment(order)
-        create_purchase_receipt(order)
-        send_packing_request(order)
-        return order
-    else:
-        raise HTTPException(status_code=404, detail="Cart not found")
+async def create_order(order: Order):
+    try:
+        with Session(engine) as session:
+            session.add(order)
+            session.commit()
+            session.refresh(order)
+            kafka_producer.send(KAFKA_TOPIC_ORDER_CREATED, value={"type": "order_created", "data": order.dict()})
+            return JSONResponse(content={"message": "Order created successfully"}, status_code=201)
+    except Exception as e:
+        logging.error(f"Error creating order: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
-def redirect_to_inventory(order: Order):
-    # Call the inventory API to reduce the unit count
-    pass
+@app.get("/orders/")
+async def read_orders():
+    try:
+        with Session(engine) as session:
+            orders = session.query(Order).all()
+        return JSONResponse(content={"orders": [o.dict() for o in orders]})
+    except Exception as e:
+        logging.error(f"Error reading orders: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
-def create_tracking_number(order: Order):
-    # Generate a tracking number for the order
-    pass
+@app.get("/orders/{order_id}")
+async def read_order_by_id(order_id: int):
+    try:
+        with Session(engine) as session:
+            order = session.query(Order).get(order_id)
+            if order is None:
+                raise HTTPException(status_code=404, detail="Order not found")
+        return JSONResponse(content={"order": order.dict()})
+    except Exception as e:
+        logging.error(f"Error reading order by id: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
-def process_payment(order: Order):
-    # Process the payment for the order
-    pass
+@app.put("/orders/{order_id}")
+async def update_order(order_id: int, order: Order):
+    try:
+        with Session(engine) as session:
+            existing_order = session.query(Order).get(order_id)
+            if existing_order is None:
+                raise HTTPException(status_code=404, detail="Order not found")
+            existing_order.quantity = order.quantity
+            existing_order.status = order.status
+            session.commit()
+            kafka_producer.send(KAFKA_TOPIC_ORDER_UPDATED, value={"type": "order_updated", "data": order.dict()})
+            return JSONResponse(content={"message": "Order updated successfully"}, status_code=200)
+    except Exception as e:
+        logging.error(f"Error updating order: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
-def create_purchase_receipt(order: Order):
-    # Create a purchase receipt for the order
-    pass
-
-def send_packing_request(order: Order):
-    # Send a packing request to the supplier
-    pass
+@app.post("/orders/{order_id}/track")
+async def track_order(order_id: int):
+    try:
+        with Session(engine) as session:
+            order = session.query(Order).get(order_id)
+            if order is None:
+                raise HTTPException(status_code=404, detail="Order not found")
+            order.status = "tracked"
+            session.commit()
+            kafka_producer.send(KAFKA_TOPIC_ORDER_TRACKED, value={"type": "order_tracked", "data": order.dict()})
+            return JSONResponse(content={"message": "Order tracked successfully"}, status_code=200)
+    except Exception as e:
+        logging.error(f"Error tracking order: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
